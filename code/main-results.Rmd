@@ -27,6 +27,8 @@ require(lmtest)
 require(broom)
 require(kableExtra)
 require(modelsummary)
+require(egg)
+require(extrafont)
 
 set.seed(05841) # Random seed
 
@@ -1265,18 +1267,179 @@ modelsummary(list(support1$model, support2$model, support3$model, support4$model
 This code combines simulation results into a single figure.
 ```{r final simulation figure}
 # Final figure for publication, all subplots in greyscale
-pdf("../figures/combined_sims_final.pdf")
-par(mfrow=c(3,3))
-dynardl.simulation.plot(resids.posts.sim.likes, type="area", response="levels", ylab="Activity", main='Likes', xlab="", ylim = c(ymin.p, ymax.p), bw = T)
-dynardl.simulation.plot(resids.posts.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="", ylim = c(ymin.p, ymax.p), bw = T)
-dynardl.simulation.plot(resids.posts.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.p, ymax.p), bw = T)
-dynardl.simulation.plot(recruits.sim.posts, type="area", response="levels", ylab="Recruitment", main='Posts', xlab="", ylim = c(ymin.r, ymax.r), bw = T)
-dynardl.simulation.plot(recruits.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="", ylim = c(ymin.r, ymax.r), bw = T)
-dynardl.simulation.plot(recruits.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.r, ymax.r), bw = T)
-dynardl.simulation.plot(supporters.sim.posts, type="area", response="levels", ylab="Support", main='Posts', xlab="", ylim = c(ymin.s, ymax.s), bw = T)
-dynardl.simulation.plot(supporters.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="Time", ylim = c(ymin.s, ymax.s), bw = T)
-dynardl.simulation.plot(supporters.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.s, ymax.s), bw = T)
-dev.off()
+# Need to manually construct figure in ggplot due to 
+# lack of customizability in standard function
+
+loadfonts(device = c("all"))
+
+# Defining custom ggplot2 theme to use times new roman font in all plots, must be called for each (sub)plot
+th <- theme(axis.title.y = element_text(size = 10, family = "Times New Roman"),
+            axis.text.y = element_text(size = 8, family = "Times New Roman"),
+            axis.title.x = element_text(size = 10, family = "Times New Roman"),
+            axis.text.x = element_text(size = 8, family = "Times New Roman"),
+            title = element_text(size = 10, family = "Times New Roman"))
+
+# Making each plot
+activity_likes <- ggplot(data = resids.posts.sim.likes$simulation,
+       aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "Activity", title = "Likes") + th
+
+activity_comments <- ggplot(data = resids.posts.sim.comments$simulation,
+                         aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "", title = "Comments") + th
+
+activity_shares <- ggplot(data = resids.posts.sim.shares$simulation,
+                            aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "", title = "Shares") + th
+
+# Recruitment
+recruit_posts <- ggplot(data = recruits.sim.posts$simulation,
+                         aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "Recruitment", title = "Posts") + th
+
+recruit_comments <- ggplot(data = recruits.sim.comments$simulation,
+                        aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "", title = "Comments") + th
+
+recruit_shares <- ggplot(data = recruits.sim.shares$simulation,
+                           aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "", title = "Shares") + th
+
+# Support
+support_posts <- ggplot(data = supporters.sim.posts$simulation,
+                        aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "Support", title = "Posts") + th
+
+support_comments <- ggplot(data = supporters.sim.comments$simulation,
+                           aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "Time", y = "", title = "Comments") + th
+
+support_shares <- ggplot(data = supporters.sim.shares$simulation,
+                         aes(x = time, y = central)) +
+    geom_ribbon(aes(ymin = ll75,
+                    ymax = ul75),
+                fill = "grey25", alpha = 0.6) +
+    geom_ribbon(aes(ymin = ll90,
+                    ymax = ul90),
+                fill = "grey45", alpha = 0.5) +
+    geom_ribbon(aes(ymin = ll95,
+                    ymax = ul95),
+                fill = "grey50", alpha = 0.4) +
+    geom_line() + theme_classic() +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
+    scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
+    geom_vline(xintercept = 4, linetype = "dotted") +
+    labs(x = "", y = "", title = "Shares") + th
+
+
+f <- ggarrange(activity_likes, activity_comments, activity_shares,
+          recruit_posts, recruit_comments, recruit_shares,
+          support_posts, support_comments, support_shares)
+ggsave("../figures/combined_sims_final.pdf", plot = f, width = 6.3, height =6.3, device = cairo_pdf)
 ```
 
 
