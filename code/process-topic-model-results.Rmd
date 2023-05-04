@@ -1,0 +1,157 @@
+---
+output: 
+  pdf_document:
+    keep_tex: true
+    fig_caption: yes
+    latex_engine: pdflatex
+geometry: margin=1in
+title: "Topic model processing"
+header-includes:
+- \usepackage{multicol}
+- \usepackage{caption}
+- \usepackage{hyperref}
+- \captionsetup[figure]{font=scriptsize}
+- \captionsetup[figure]{labelformat=empty}
+- \DeclareUnicodeCharacter{2212}{-}
+---
+
+
+# LOAD PACKAGES AND DATA
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(dev = 'pdf')
+require(knitr)
+require(formatR)
+require(stm)
+require(tidyverse)
+require(lubridate)
+
+opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+opts_chunk$set(tidy = FALSE)
+
+knitr::knit_hooks$set(mysize = function(before, options, envir) {
+  if (before) 
+    return(options$size)
+})
+
+```
+
+
+Load trained topic model.
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+load("../topic_model/30topic_deduped")
+```
+
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+# Here is the estimated topic proportion for every document in the corpus
+m <- cbind(fit.full$theta, as.matrix(newdocs$meta))
+colnames(m) <- c(paste("Topic", 1:30,sep="_"), "date_id")
+```
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+topics <- left_join(as.data.frame(m), lookup, by="date_id")
+
+cols <- c("T_intl_solidarity", "T_motivational", "T_regions", "T_protests",
+                      "T_terrorism_middle_east", "T_criticism_politicians", "T_military", "T_crime", "T_online_promotion",
+                      "T_trump", "T_bible", "T_criticism_Facebook", "T_elections", "T_immigration", "T_brexit", 
+                      "T_misc_news", "T_email_promotion", "T_terrorism_europe", "T_islam_sex", "T_refugees", "T_self_promotion",
+                      "T_islam_videos", "T_leadership", "T_media_and_aid", "T_merchandise", "T_UKIP_misc", "T_islam_general",
+                      "T_terrorism_general", "T_islam_sharia", "T_misc_values", "date_id", "date")
+
+colnames(topics) <- cols
+
+# Defining topic clusters based on close reading of topics
+
+## Motivational topics, direct motivation and international solidarity
+topics$M_motivational <- topics$T_motivational + topics$T_intl_solidarity + topics$T_self_promotion
+
+## Promotion of Britain First
+topics$M_promotional <- topics$T_online_promotion + topics$T_email_promotion + topics$T_merchandise
+
+## Repression: Facebook bans and legal trouble (maybe better to say this is defending BF)
+topics$M_repression <- topics$T_leadership + topics$T_criticism_Facebook
+
+## Islam (Islam and sex abuse, extremism, sharia, halal)
+topics$M_islam <- topics$T_islam_general + topics$T_islam_sex + topics$T_islam_sharia + topics$T_islam_videos
+
+## Terrorism (in the Middle East and Europe)
+topics$M_terrorism <- topics$T_terrorism_europe + topics$T_terrorism_general + topics$T_terrorism_middle_east
+
+## Topics in politics (Trump, the BBC, foreign aid, UKIP), excluding Brexit
+topics$M_politics <- topics$T_trump + topics$T_elections + topics$T_UKIP_misc
+
+## Immigration and the refugee crisis
+topics$M_immigration <- topics$T_immigration + topics$T_refugees
+
+# Total proportion accounted for
+topics$issue_total <- topics$M_islam + topics$M_immigration + topics$M_terrorism + topics$M_politics + topics$T_crime + topics$T_military
+
+topics$instrumental_total <- topics$M_promotional  + topics$M_motivational + topics$M_repression + topics$T_protests
+
+topics$main_total <- topics$issue_total + topics$instrumental_total
+
+# Storing topics with post IDs
+# Need to address removed docs
+# Verifying discrepancy
+dim(data)[1]-length(processed.full$docs.removed)-length(out.full$docs.removed)-length(newdocs$docs.removed) == dim(topics)[1]
+
+to.remove <- c(processed.full$docs.removed, out.full$docs.removed, newdocs$docs.removed)
+
+# Checking length
+dim(data)[1] - length(to.remove) == dim(topics)[1]
+
+# Now removing by index
+# The `docs.removed` indices are relative each step so we must do this
+# in an iterative way
+
+# First step, define numeric index and filter docs removed at initial preprocessing
+# These are dropped due to word count threshold
+
+data$idx <- 1:dim(data)[1]
+data2 <- data %>% filter(!idx %in% processed.full$docs.removed)
+
+# Next drop those removed in second stage (due to low frequency after removing infrequent words)
+data2$idx <- 1:dim(data2)[1]
+data3 <- data2 %>% filter(!idx %in% out.full$docs.removed)
+
+# Finally, removing docus largely made up of words not considered in original corpus
+# Almost all extremely sort
+data3$idx <- 1:dim(data3)[1]
+data4 <- data3 %>% filter(!idx %in% newdocs$docs.removed)
+
+data4 <- data4 %>% select(id = X, text, link, time, type, likes, comments, shares, reactions)
+
+topics.full <- bind_cols(data4, topics)
+write_csv(topics.full, "../data/full_topic_info_deduped_30topics.csv")
+```
+
+```{r weekly summarties}
+# Now merging at weekly level
+topics.weekly <- topics %>%
+      mutate(week = floor_date(date, unit = "week")+2) %>%
+      group_by(week) %>%
+      summarize_if(is.numeric, mean) %>%
+      select(!date_id)
+
+#topics <- topics %>% dplyr::select(week, contains("Topic"))
+
+# Repeating for counts
+topic_count <- function(x) {
+    return(sum(ifelse(x > mean(x)+sd(x), 1, 0)))
+}
+
+topic.counts.weekly <- topics %>%
+      mutate(week = floor_date(date, unit = "week")+2) %>%
+      group_by(week) %>%
+      summarize_if(is.numeric, topic_count) %>%
+      select(!date_id)
+```
+
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+write_csv(topics.weekly, "../data/weekly_topic_and_cluster_proportions_30topic_deduped.csv")
+write_csv(topic.counts.weekly, "../data/weekly_topic_and_cluster_counts_30topic_deduped.csv")
+```

@@ -1,0 +1,1671 @@
+---
+title: 'Audience Engagement and Online Activism'
+author: |
+  | Thomas Davidson
+  | Rutgers University
+fontsize: 12pt
+output:
+header-includes: \usepackage{setspace}\doublespacing
+indent: yes
+geometry: margin=1in
+---
+
+This RMarkdown file can be used to reproduce the main results. It includes code to conduct various time series tests, run regression models, produce tables, and run simulations. Run each chunk consecutively to avoid errors.
+
+# LOADING PACKAGES AND DATA
+Ensure that all required packages are installed before proceeding.
+```{r}
+require(tidyverse)
+require(tseries)
+require(urca)
+require(zoo)
+require(dplyr)
+require(lubridate)
+require(dynamac)
+require(ggplot2)
+require(lmtest)
+require(broom)
+require(kableExtra)
+require(modelsummary)
+
+set.seed(05841) # Random seed
+
+options(scipen=999)
+options(digits=3)
+options(xtable.comment = FALSE)
+```
+
+
+```{r loading and merging data, warning=FALSE, echo = FALSE}
+posts <- read_csv("../data/bf_weekly_post_info.csv") %>% 
+    mutate(date = mdy(date)) %>% dplyr::filter(date >= mdy("04-01-2014"))
+
+recruits <- read_csv("../data/bf_weekly_recruitment.csv")
+colnames(recruits) <- c("date", "recruits")
+
+supporters <- read_csv("../data/bf_weekly_support.csv")
+colnames(supporters) <- c("date", "supporters")
+
+df <- posts %>% left_join(supporters, by = "date") %>%
+    left_join(recruits, by = "date")
+
+
+topics <- read.csv("../data/weekly_topic_and_cluster_proportions_30topic_deduped.csv") %>% mutate(week = ymd(week))
+topics[,2:ncol(topics)] <- topics[,2:ncol(topics)]*100 # converting proportions to percentages
+
+df <- df %>% left_join(topics, by = c("date" = "week"))
+
+# NEWSPAPER data
+media <- read_csv("../data/bf_media.csv") %>% mutate(Date = mdy(Date)) %>%
+    dplyr::select(Date, Total) %>% rename(media = Total)
+
+media.week <- media %>%
+  mutate(week = floor_date(Date, unit = "week")+2) %>%
+  group_by(week) %>%
+  summarize(media = sum(media))
+
+df <- df %>% left_join(media.week, by = c("date" = "week")) %>%
+    replace_na(list(media = 0))
+
+# EVENT DATA
+# For each event, I need a function to map it onto weeks defined here
+elections <- as.Date(c('2014-05-22', '2015-05-07', '2016-05-05', '2016-06-23'))
+attacks <- as.Date(c('2015-01-07','2015-06-26','2015-11-13','2016-03-22','2016-07-14',
+        '2016-12-19', '2017-03-22'))
+protests <- read_csv("../data/bf_protests.csv") %>%
+    mutate(Date = mdy(Date))
+actions <- read_csv("../data/bf_direct_actions.csv") %>%
+    mutate(Date = mdy(Date))
+
+# Mapping events to weeks
+election_week <- rep(0, dim(df)[1])
+i <- 1
+for (d in df$date) {
+    for (e in elections) {
+        if (e >= d & e <= d+6) {
+            election_week[i] <- 1}}
+    i <- i+1}
+
+attack_week <- rep(0, dim(df)[1])
+i <- 1
+for (d in df$date) {
+    for (e in attacks) {
+        if (e >= d & e <= d+6) {
+            attack_week[i] <- 1}}
+    i <- i+1}
+
+protest_week <- rep(0, dim(df)[1])
+i <- 1
+for (d in df$date) {
+    for (e in protests$Date) {
+        if (e >= d & e <= d+6) {
+            protest_week[i] <- 1}}
+    i <- i+1}
+
+action_week <- rep(0, dim(df)[1])
+i <- 1
+for (d in df$date) {
+    for (e in actions$Date) {
+        if (e >= d & e <= d+6) {
+            action_week[i] <- 1}}
+    i <- i+1}
+
+df <- df %>% mutate(elections = election_week,
+                    attacks = attack_week,
+                    protests = protest_week,
+                    actions = action_week)
+
+df <- df %>% mutate(post_brexit = ifelse(date >= as.Date("2016-06-23"), 1,0))
+
+# Adding lags and leads
+# Attacks and actions only get lags
+df <- df %>% mutate(
+    elections.lead = dplyr::lead(elections, n=1),
+    elections.lag = dplyr::lag(elections, n=1),
+    protests.lead = dplyr::lead(protests, n=1),
+    protests.lag = dplyr::lag(protests, n=1),
+    attacks.lag = dplyr::lag(attacks, n=1),
+    actions.lag = dplyr::lag(actions, n=1)
+)
+# Note I had to specify dplyr to avoid using stats::lag or lead, which does not work as expected.
+
+# Adding Jo Cox murder, 6/16
+df <- df %>% mutate(cox_murder = ifelse(date == "2016-06-14", 1, 0),
+                    cox_murder.lag = ifelse(date == "2016-06-21", 1, 0)) 
+
+# Missing values introduced with lags and leads so filling with zeros
+df <- df %>%
+  replace_na(list(elections.lead = 0,
+                elections.lag = 0,
+                protests.lead = 0,
+                protests.lag = 0,
+                attacks.lag = 0,
+                actions.lag = 0))
+
+write_csv(df, '../data/weekly_dataset.csv')
+```
+
+
+```{r constructing other variables}
+# Log transform
+df$log.posts <- log(df$posts)
+df$log.shares <- log(df$shares)
+df$log.likes <- log(df$likes)
+df$log.comments <- log(df$comments)
+df$log.recruits <- log(df$recruits)
+df$log.supporters <- log(df$supporters)
+# Including variables used for robustness checks
+df$log.photo <- log(df$photo)
+df$log.video <- log(df$video+1)
+df$log.eb <- log(df$any_mention+1)
+```
+
+
+# EXAMINING TIME SERIES
+ADF and KPSS tests are used to assess stationarity. There is not a simple way to extract values or present in tabular form. Below is a set of custom functions used to extract this data and tabulate it.
+```{r tests, warning=FALSE, message=FALSE, error=FALSE, echo=FALSE, results='asis'}
+get.adf.info <- function(x, l){
+  a = capture.output(summary(ur.df(x, lags=l)))
+  for (s in a) {
+    if (startsWith(s, "Value of")) {
+      test_statistic = unlist(strsplit(s, ":"))[2]
+      test_statistic = unlist(strsplit(test_statistic, " "))[2]
+      test_statistic = as.numeric(test_statistic)
+    }
+    if (startsWith(s, "tau")) {
+      crit_vals = str_trim(unlist(strsplit(s, "tau1"))[2], side="both")
+      crit_vals = unlist(strsplit(crit_vals, " "))
+      crit_vals = unlist(lapply(crit_vals, as.numeric))
+      crit_vals = rev(crit_vals)
+    }
+  }
+  return(c(test_statistic, crit_vals))
+}
+
+get.kpss.info <- function(x, l){
+  a = capture.output(summary(ur.kpss(x, use.lag=l)))
+  
+  for (s in a) {
+    if (startsWith(s, "Value of")) {
+      test_statistic = unlist(strsplit(s, ":"))[2]
+      test_statistic = unlist(strsplit(test_statistic, " "))[2]
+      test_statistic = as.numeric(test_statistic)
+    }
+    if (startsWith(s, "critical values")) {
+      crit_vals = str_trim(unlist(strsplit(s, "critical values "))[2], side="both")
+      print(crit_vals)
+      crit_vals = unlist(strsplit(crit_vals, " "))
+      crit_vals = unlist(lapply(crit_vals, as.numeric))
+      crit_vals = crit_vals[!is.na(crit_vals)]
+      crit_vals = c(crit_vals[1],crit_vals[3:4])
+    }
+  }
+  return(c(test_statistic, crit_vals))
+}
+
+get.results.for.all.params.restricted <- function(x, column, differenced) {
+  
+  info <- matrix(, nrow=1, ncol=5)
+  counter <- 1
+  i <- 1
+  adf.info <- get.adf.info(x, l=i)
+  kpss.info <- get.kpss.info(x, l=i)
+  if (adf.info[1] < adf.info[3]) {adf.stationary = "$\\checkmark$"}
+  else {adf.stationary = ""}
+  if (kpss.info[1] < kpss.info[3]) {kpss.stationary = "$\\checkmark$"}
+  else {kpss.stationary = ""}
+  info[1,] <- c(column, adf.info[1], adf.stationary, kpss.info[1], kpss.stationary)
+  info <- as.data.frame(info)
+  colnames(info) <- c("Variable", "ADF ($H_{0} = I(1))$", "ADF stationary (95%)", "KPSS ($H_{0} = I(0))$", "KPSS stationary (95%)")
+  return(info)
+}
+```
+
+A chunk is used to assess stationarity for each outcome and key independent variable.
+```{r posts stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+pacf(df$log.posts)
+acf(df$log.posts)
+
+posts.tests <- get.results.for.all.params.restricted(df$log.posts, "Posts")
+print(posts.tests)
+
+posts.tests.2 <- get.results.for.all.params.restricted(diff(df$log.posts), "$\\Delta$Posts")
+print(posts.tests.2)
+
+
+# Stationary after differencing
+#par(mfrow=(c(2,1)))
+ts.plot(df$log.posts, ylab="Log posts (levels)")
+ts.plot(diff(df$log.posts), ylab="Log posts (first-differences)")
+```
+
+```{r recruits stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.recruits)
+recruits.tests <- get.results.for.all.params.restricted(df$log.recruits, "New users")
+print(recruits.tests)
+
+recruits.tests.2 <- get.results.for.all.params.restricted(diff(df$log.recruits), "$\\Delta$New users")
+print(recruits.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.recruits))
+```
+
+```{r supporters stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.supporters)
+supporters.tests <- get.results.for.all.params.restricted(df$log.supporters, "Active users")
+print(supporters.tests)
+
+supporters.tests.2 <- get.results.for.all.params.restricted(diff(df$log.supporters), "$\\Delta$Active users")
+print(supporters.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.supporters))
+```
+
+```{r media stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$media)
+media.tests <- get.results.for.all.params.restricted(df$media, "Media")
+print(media.tests)
+
+media.tests.2 <- get.results.for.all.params.restricted(diff(df$media), "$\\Delta$Media")
+print(media.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$media))
+```
+
+```{r likes stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.likes)
+likes.tests <- get.results.for.all.params.restricted(df$log.likes, "Likes")
+print(likes.tests)
+
+likes.tests.2 <- get.results.for.all.params.restricted(diff(df$log.likes), "$\\Delta$Likes")
+print(likes.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.likes))
+```
+
+```{r comments stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.comments)
+comments.tests <- get.results.for.all.params.restricted(df$log.comments, "Comments")
+print(comments.tests)
+
+comments.tests.2 <- get.results.for.all.params.restricted(diff(df$log.comments), "$\\Delta$Comments")
+print(comments.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.comments))
+```
+
+```{r shares stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.shares)
+shares.tests <- get.results.for.all.params.restricted(df$log.shares, "Shares")
+print(shares.tests)
+
+shares.tests.2 <- get.results.for.all.params.restricted(diff(df$log.shares), "$\\Delta$Shares")
+print(shares.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.shares))
+```
+
+```{r shares stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.photo)
+log.photo.tests <- get.results.for.all.params.restricted(df$log.photo, "log.photo")
+print(log.photo.tests)
+
+log.photo.tests.2 <- get.results.for.all.params.restricted(diff(df$log.photo), "$\\Delta$log.photo")
+print(log.photo.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.photo))
+```
+
+```{r shares stationarity tests}
+#ADF Null = Unit root
+#KPSS Null = No unit root
+ts.plot(df$log.video)
+log.video.tests <- get.results.for.all.params.restricted(df$log.video, "log.video")
+print(log.video.tests)
+
+log.video.tests.2 <- get.results.for.all.params.restricted(diff(df$log.video), "$\\Delta$log.video")
+print(log.video.tests.2)
+# Stationary after differencing agreed
+ts.plot(diff(df$log.video))
+```
+
+```{r tabulating first set of tests}
+tests.combined.1 <- bind_rows(posts.tests, posts.tests.2, recruits.tests, recruits.tests.2, supporters.tests, supporters.tests.2, likes.tests, likes.tests.2, comments.tests, comments.tests.2, shares.tests, shares.tests.2, media.tests, media.tests.2) #log.photo.tests, log.photo.tests.2, log.video.tests, log.video.tests.2)
+kable(tests.combined.1, format = "html", title = "Stationarity tests for main variables") %>% save_kable("../tables/main_stationarity.html")
+```
+
+```{r log.eb stationarity tests}
+ts.plot(df$log.eb)
+bait.tests <- get.results.for.all.params.restricted(df$log.eb, "EB")
+print(bait.tests)
+
+bait.tests.2 <- get.results.for.all.params.restricted(diff(df$log.eb), "$\\Delta$EB")
+print(bait.tests.2)
+ts.plot(diff(df$log.eb))
+```
+
+```{r T_protests stationarity tests}
+ts.plot(df$T_protests)
+T_protests.tests <- get.results.for.all.params.restricted(df$T_protests, "Protests")
+print(T_protests.tests)
+
+T_protests.tests.2 <- get.results.for.all.params.restricted(diff(df$T_protests), "$\\Delta$Protests")
+print(T_protests.tests.2)
+ts.plot(diff(df$T_protests))
+
+```
+
+```{r M_motivational topic stationarity tests}
+ts.plot(df$M_motivational)
+M_motivational.tests <- get.results.for.all.params.restricted(df$M_motivational, "Motivational")
+print(M_motivational.tests)
+
+M_motivational.tests.2 <- get.results.for.all.params.restricted(diff(df$M_motivational), "$\\Delta$Motivational")
+print(M_motivational.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_motivational))
+```
+
+```{r M_promotional topic stationarity tests}
+ts.plot(df$M_promotional)
+M_promotional.tests <- get.results.for.all.params.restricted(df$M_promotional, "Promotional")
+print(M_promotional.tests)
+
+M_promotional.tests.2 <- get.results.for.all.params.restricted(diff(df$M_promotional), "$\\Delta$Promotional")
+print(M_promotional.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_promotional))
+```
+
+```{r M_repression topic stationarity tests}
+ts.plot(df$M_repression)
+M_repression.tests <- get.results.for.all.params.restricted(df$M_repression, "Organizational")
+print(M_repression.tests)
+
+M_repression.tests.2 <- get.results.for.all.params.restricted(diff(df$M_repression), "$\\Delta$Organizational")
+print(M_repression.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_repression))
+```
+
+```{r M_islam topic stationarity tests}
+ts.plot(df$M_islam)
+M_islam.tests <- get.results.for.all.params.restricted(df$M_islam, "Islam")
+print(M_islam.tests)
+
+M_islam.tests.2 <- get.results.for.all.params.restricted(diff(df$M_islam), "$\\Delta$Islam")
+print(M_islam.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_islam))
+```
+
+```{r M_terrorism topic stationarity tests}
+ts.plot(df$M_terrorism)
+M_terrorism.tests <- get.results.for.all.params.restricted(df$M_terrorism, "Terrorism")
+print(M_terrorism.tests)
+
+M_terrorism.tests.2 <- get.results.for.all.params.restricted(diff(df$M_terrorism), "$\\Delta$Terrorism")
+print(M_terrorism.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_terrorism))
+```
+
+```{r T_crime topic stationarity tests}
+ts.plot(df$T_crime)
+T_crime.tests <- get.results.for.all.params.restricted(df$T_crime, "Crime")
+print(T_crime.tests)
+
+T_crime.tests.2 <- get.results.for.all.params.restricted(diff(df$T_crime), "$\\Delta$Crime")
+print(T_crime.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$T_crime))
+```
+
+```{r T_military topic stationarity tests}
+ts.plot(df$T_military)
+T_military.tests <- get.results.for.all.params.restricted(df$T_military, "Military")
+print(T_military.tests)
+
+T_military.tests.2 <- get.results.for.all.params.restricted(diff(df$T_military), "$\\Delta$Military")
+print(T_military.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$T_military))
+```
+
+```{r M_politics topic stationarity tests}
+ts.plot(df$M_politics)
+M_politics.tests <- get.results.for.all.params.restricted(df$M_politics, "Politics")
+print(M_politics.tests)
+
+M_politics.tests.2 <- get.results.for.all.params.restricted(diff(df$M_politics), "$\\Delta$Politics")
+print(M_politics.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_politics))
+```
+
+```{r M_immigration topic stationarity tests}
+ts.plot(df$M_immigration)
+M_immigration.tests <- get.results.for.all.params.restricted(df$M_immigration, "Immigration")
+print(M_immigration.tests)
+
+M_immigration.tests.2 <- get.results.for.all.params.restricted(diff(df$M_immigration), "$\\Delta$Immigration")
+print(M_immigration.tests.2)
+# Stationary after first-differencing
+ts.plot(diff(df$M_immigration))
+```
+
+```{r topic stationarity tests}
+tests.combined.2 <- bind_rows(M_terrorism.tests, M_terrorism.tests.2, M_islam.tests, M_islam.tests.2, M_politics.tests, M_politics.tests.2, M_immigration.tests, M_immigration.tests.2, T_crime.tests, T_crime.tests.2, T_military.tests, T_military.tests.2, M_motivational.tests, M_motivational.tests.2, M_repression.tests, M_repression.tests.2, M_promotional.tests, M_promotional.tests.2, T_protests.tests, T_protests.tests.2)
+kable(tests.combined.2, format = "html", title = "Stationarity tests for topic series") %>% save_kable("../tables/topics_stationarity.html")
+```
+
+
+############################################
+############## MODELING ####################
+############################################
+
+
+The following chunks can be used to run all the models. Starting with the model analyzing BF's activity, measured as the number of weekly Facebook posts.
+
+# ACTIVITY MODELS
+```{r modeling posts}
+# Posts endogenous
+posts.1 <- dynardl(log.posts ~ log.likes + log.comments + log.shares,
+                        data = df,
+                        lags = list('log.posts' = 1, 'log.likes' = 1, 'log.comments' = 1, 'log.shares' = 1),
+                        diffs = c('log.likes', 'log.comments', 'log.shares'),
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+# Posts + events
+
+posts.2 <- dynardl(log.posts ~ media + log.likes + log.comments + log.shares + elections + elections.lag + elections.lead + attacks + attacks.lag + cox_murder  + cox_murder.lag + actions + actions.lag + protests.lead + protests + protests.lag + post_brexit,
+                        data = df,
+                        lags = list('log.posts' = 1,  'media' = 1,  'log.likes' = 1, 'log.comments' = 1, 'log.shares' = 1),
+                        diffs = c('media',  'log.likes', 'log.comments', 'log.shares'),
+                        levels = c('elections.lead', 'elections', 'elections.lag', 
+                                   'attacks', 'attacks.lag', 'cox_murder', 'cox_murder.lag', 'actions', 'actions.lag', 
+                                   'protests.lead', 'protests', 'protests.lag',
+                                   'post_brexit'
+                                   ),
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+dyn.tests1 <- dynardl.auto.correlated(posts.1, object.out = T) 
+dyn.tests2 <- dynardl.auto.correlated(posts.2, object.out = T) 
+# Residuals are white noise and R2 has increased.
+
+# Running bounds test for second model
+posts.bounds <- pssbounds(posts.2, object.out = T) # This confirms that cointegration is present
+
+shapiro.test(posts.2$model$residuals)
+ks.test(posts.2$model$residuals, "pnorm", mean = mean(posts.2$model$residuals), sd = sqrt(var(posts.2$model$residuals)), exact=F) # alternative test
+jarque.bera.test(posts.2$model$residuals)
+
+pdf("../figures/residuals_posts.pdf", width = 6.3, height = 5)
+par(mfrow=c(3,1))
+ts.plot(posts.2$model$residuals, gpars = list(ylab='Residual'))
+hist(posts.2$model$residuals, breaks=25, xlab="Residual", main="")
+qqnorm(posts.2$model$residuals, main="")
+qqline(posts.2$model$residuals)
+dev.off()
+```
+
+```{r posts regression tables}
+# Use coef_map to impose order and rename variables
+coef_names_posts <- c( # Vector of variable names
+    "l.1.log.posts" = "Activity (lag)",
+    "l.1.log.likes" = "Likes (lag)",
+    "l.1.log.comments" = "Comments (lag)",
+    "l.1.log.shares" = "Shares (lag)",
+    "d.1.log.likes" = "$\\Delta$ Likes",
+    "d.1.log.comments" = "$\\Delta$ Comments",
+    "d.1.log.shares" = "$\\Delta$ Shares",
+    "l.1.media" = "Media (lag)",
+    "d.1.media" = "$\\Delta$ Media",
+    "elections.lead"= "Elections (lead)",
+    "elections"= "Elections",
+    "elections.lag" = "Elections (lag)",
+    "post_brexit" = "Post-Brexit",
+    "attacks" = "Terrorist attack",
+    "attacks.lag" = "Terrorist attack (lag)",
+    "cox_murder" = "Cox murder",
+    "cox_murder.lag" = "Cox murder (lag)",
+    "actions" = "Direct actions",
+    "actions.lag" = "Direct actions (lag)",
+    "protests.lead" = "BF protests (lead)",
+    "protests" = "BF protests",
+    "protests.lag" = "BF protests (lag)",
+    "trendvar" = "Trend",
+    "(Intercept)" = "Intercept"
+)  
+
+# Uncomment and run to get exact test statistics for bounds, BG, and SW
+# Stats on their own are not so meaningful so prefer version below with simple indicators
+# https://vincentarelbundock.github.io/modelsummary/articles/modelsummary.html#add_rows
+# Extracting bounds results
+# t.stat <- paste("(", posts.bounds$ttest.I0.p05, ", ", posts.bounds$ttest.I1.p05, ")", " ", posts.bounds$tstat, sep = "")
+# F.stat <- paste("(", posts.bounds$ftest.I0.p05, ", ", posts.bounds$ftest.I1.p05, ")", " ", posts.bounds$fstat, sep = "")
+# 
+# rows <- tribble(~term, ~Model1, ~Model2,
+#                 "Breusch-Godfrey", 
+#                 as.character(round(as.numeric(dyn.tests1$bg$statistic),3)),
+#                 as.character(round(as.numeric(dyn.tests2$bg$statistic),3)),
+#                 "Shapiro-Wilk",
+#                 as.character(round(as.numeric(dyn.tests1$sw$statistic),3)),
+#                 as.character(round(as.numeric(dyn.tests2$sw$statistic),3)),
+#                 "PSS F",'-',t.stat,
+#                 "PSS t",'-',F.stat)
+
+# Alternative using check marks
+summarize_bounds <- function(bounds) {
+    t <- ifelse(bounds$tstat < bounds$ttest.I1.p05, "Pass", "Fail")
+    f <- ifelse(bounds$fstat > bounds$ftest.I1.p05, "Pass", "Fail")
+    return (c(t, f))
+}
+
+summarize_tests <- function(tests) {
+    # Input is dyn.tests object
+    # Returns tuple with checkmarks and crosses depending on p < 0.05 for each
+    # Rejection of null is bad
+    bg_result <- ifelse(tests$bg$p.value > 0.05, "Pass", "Fail")
+    sw_result <- ifelse(tests$sw$p.value > 0.05, "Pass", "Fail")
+    return (c(bg_result, sw_result))
+}
+
+rows2 <- tribble(~term, ~Model1, ~Model2,
+                "Breusch-Godfrey", 
+                summarize_tests(dyn.tests1)[1],
+                summarize_tests(dyn.tests2)[1],
+                "Shapiro-Wilk",
+                summarize_tests(dyn.tests1)[2],
+                summarize_tests(dyn.tests2)[2],
+                "PSS F",'-',summarize_bounds(posts.bounds)[1],
+                "PSS t",'-',summarize_bounds(posts.bounds)[2])
+
+
+
+modelsummary(list(posts.1$model, posts.2$model), stars = c("*" = 0.05, "**" = 0.01, "***" = 0.001), coef_map = coef_names_posts, gof_omit = "Log.Lik.|RMSE", fmt = 2, add_rows = rows2, title="ECM predicting week change in number of posts by Britain First", output = "../tables/activity_table.docx")
+
+# Note: These tables are nearly there but require some manual adjustment to get to published version. Stars for significance to post-estimation tests, LDV values from Enders, and checkmarks are added manually to tables. 
+```
+
+
+```{r simulations for activity}
+# Simulations 
+posts.2.eq <- as.formula("log.posts ~ media + log.likes + log.comments + log.shares + elections + elections.lag + elections.lead + attacks + attacks.lag + cox_murder  + cox_murder.lag + actions + actions.lag + protests.lead + protests + protests.lag + post_brexit")
+posts.2.lags <- list('log.posts' = 1,  'media' = 1,  'log.likes' = 1, 'log.comments' = 1, 'log.shares' = 1)
+posts.2.diffs <- c('media',  'log.likes', 'log.comments', 'log.shares')
+posts.2.levels <- c('elections.lead', 'elections', 'elections.lag', 
+                                   'attacks', 'attacks.lag', 'cox_murder', 'cox_murder.lag', 'actions', 'actions.lag', 
+                                   'protests.lead', 'protests', 'protests.lag',
+                                   'post_brexit'
+                                   )
+
+# Likes
+resids.posts.sim.likes <- dynardl(posts.2.eq,
+                        data = df,
+                        lags = posts.2.lags,
+                        diffs = posts.2.diffs,
+                        levels = posts.2.levels,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = T,
+                        shockvar="log.likes",
+                        time=5,
+                        range=13,
+                        sims=10000,
+                        expectedval = FALSE)
+
+# Comments
+resids.posts.sim.comments <- dynardl(posts.2.eq,
+                        data = df,
+                        lags = posts.2.lags,
+                        diffs = posts.2.diffs,
+                        levels = posts.2.levels,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = T,
+                        shockvar="log.comments",
+                        time=5,
+                        range=13,
+                        sims=10000,
+                        expectedval = FALSE)
+
+# Shares
+resids.posts.sim.shares <- dynardl(posts.2.eq,
+                        data = df,
+                        lags = posts.2.lags,
+                        diffs = posts.2.diffs,
+                        levels = posts.2.levels,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = T,
+                        shockvar="log.shares",
+                        time=5,
+                        range=13,
+                        sims=10000,
+                        expectedval = FALSE)
+
+# Exponentiating the simulation results to show on natural scale
+# Then reverse for two columns where this is not needed
+resids.posts.sim.likes$simulation <- resids.posts.sim.likes$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+resids.posts.sim.comments$simulation <- resids.posts.sim.comments$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+resids.posts.sim.shares$simulation <- resids.posts.sim.shares$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+ymax.p <- max(resids.posts.sim.likes$simulation$ul95)
+ymin.p <- min(resids.posts.sim.shares$simulation$ll95)
+pdf("../figures/posts_sims_final.pdf", width = 6.3, height = 4) # Revisit and verify how to save
+par(mfrow=c(1,3))
+dynardl.simulation.plot(resids.posts.sim.likes, type="area", response="levels", ylab="Activity", main='Likes', xlab="", ylim = c(ymin.p, ymax.p))
+dynardl.simulation.plot(resids.posts.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="Time", ylim = c(ymin.p, ymax.p))
+dynardl.simulation.plot(resids.posts.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.p, ymax.p))
+dev.off()
+```
+
+# RECRUITMENT MODELS
+```{r modeling recruitment}
+lags_social_only_r <- list('log.posts' = 1, 'log.recruits' = 1, 'log.comments' = 1, 'log.shares' = 1)
+diffs_social_only_r <- c('log.posts', 'log.comments', 'log.shares')
+
+recruit1 <- dynardl(log.recruits ~ log.posts + log.comments + log.shares,
+                        data = df,
+                        lags = lags_social_only_r,
+                        diffs = diffs_social_only_r,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+r1t <- dynardl.auto.correlated(recruit1, object.out = T)
+
+lags_social_and_topics_r <- list('log.posts' = 1, 'log.recruits' = 1, 'log.comments' = 1, 
+                                    'log.shares' = 1,
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                               'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 'M_immigration' = 1, 
+                                    'M_politics' = 1, 'T_crime' = 1, 
+                                    'T_military' = 1)
+diffs_social_and_topics_r <- c('log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 'T_protests',
+                                    'M_islam', 'M_terrorism', 'M_immigration', 'M_politics',
+                               'T_crime', 'T_military')
+
+recruit2 <- dynardl(log.recruits ~ log.posts + log.comments + log.shares + M_motivational + 
+                         M_repression + M_promotional + T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                        data = df,
+                        lags = lags_social_and_topics_r,
+                        diffs = diffs_social_and_topics_r,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+r2t <- dynardl.auto.correlated(recruit2, object.out = T)
+
+lags_social_and_media_r <- list('log.posts' = 1,  'media' = 1,   'log.recruits' = 1,
+                                'log.comments' = 1, 'log.shares' = 1)
+diffs_social_and_media_r <- c('media', 'log.posts', 'log.comments', 'log.shares')
+
+events <- c('elections.lead', 'elections', 'elections.lag', 
+                               'attacks', 'attacks.lag', 'cox_murder', 
+                               'cox_murder.lag', 'actions', 'actions.lag', 
+                                'protests.lead', 'protests', 'protests.lag',
+                                   'post_brexit')
+
+recruit3 <- dynardl(log.recruits ~ log.posts + media + log.comments + log.shares + elections + elections.lag +
+                         elections.lead + attacks + attacks.lag + cox_murder  + cox_murder.lag + actions + 
+                         actions.lag + protests.lead + protests + protests.lag + post_brexit,
+                        data = df,
+                        lags = lags_social_and_media_r,
+                        diffs = diffs_social_and_media_r,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+r3t <- dynardl.auto.correlated(recruit3, object.out = T)
+
+lags_full_r <- list('log.posts' = 1,  'media' = 1, 'log.recruits' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1)
+diffs_full_r <- c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military')
+
+recruit4 <- dynardl(log.recruits ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                        data = df,
+                        lags = lags_full_r,
+                        diffs = diffs_full_r,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+recruit.formula.final <- as.formula("log.recruits ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration")
+
+r4t <- dynardl.auto.correlated(recruit4, object.out = T)
+
+recruit.bounds <- pssbounds(recruit4, object.out = T) # I(1)
+
+
+shapiro.test(recruit4$model$residuals)
+ks.test(recruit4$model$residuals, "pnorm", mean = mean(recruit4$model$residuals), sd = sqrt(var(recruit4$model$residuals)), exact=F) # alternative test
+jarque.bera.test(recruit4$model$residuals)
+
+pdf("../figures/residuals_recruits.pdf", width = 6.3, height = 5)
+par(mfrow=c(3,1))
+ts.plot(recruit4$model$residuals, gpars = list(ylab='Residual'))
+hist(recruit4$model$residuals, breaks=25, xlab="Residual", main="")
+qqnorm(recruit4$model$residuals, main="")
+qqline(recruit4$model$residuals)
+dev.off()
+
+####
+```
+
+```{r recruitment sims}
+## Now to run a simulation
+recruits.sim.posts <- dynardl(recruit.formula.final,
+                        data = df,
+                        lags = lags_full_r,
+                        diffs = diffs_full_r,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.posts",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+recruits.sim.comments <- dynardl(recruit.formula.final,
+                        data = df,
+                        lags = lags_full_r,
+                        diffs = diffs_full_r,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.comments",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+
+recruits.sim.shares <- dynardl(recruit.formula.final,
+                        data = df,
+                        lags = lags_full_r,
+                        diffs = diffs_full_r,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.shares",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+recruits.sim.posts$simulation <- recruits.sim.posts$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+recruits.sim.comments$simulation <- recruits.sim.comments$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+recruits.sim.shares$simulation <- recruits.sim.shares$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+
+ymax.r <- max(recruits.sim.shares$simulation$ul95)
+ymin.r <- min(recruits.sim.posts$simulation$ll95)
+pdf("../figures/recruitment_sims_final.pdf", width = 6.3, height = 4)
+par(mfrow=c(1,3))
+dynardl.simulation.plot(recruits.sim.posts, type="area", response="levels", ylab="Recruitment", main='Posts', xlab="", ylim = c(ymin.r, ymax.r))
+dynardl.simulation.plot(recruits.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="Time", ylim = c(ymin.r, ymax.r))
+dynardl.simulation.plot(recruits.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.r, ymax.r))
+dev.off()
+```
+
+
+```{r nl regression tables}
+# Old code showing test statistics
+# t.stat <- paste("(", recruit.bounds$ttest.I0.p05, ", ", recruit.bounds$ttest.I1.p05, ")", " ", round(recruit.bounds$tstat,2), sep = "")
+# F.stat <- paste("(", recruit.bounds$ftest.I0.p05, ", ", recruit.bounds$ftest.I1.p05, ")", " ", round(recruit.bounds$fstat,2), sep = "")
+
+# rows <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+#                 "Breusch-Godfrey", 
+#                 as.character(round(as.numeric(r1t$bg$statistic),3)),
+#                 as.character(round(as.numeric(r2t$bg$statistic),3)),
+#                 as.character(round(as.numeric(r3t$bg$statistic),3)),
+#                 as.character(round(as.numeric(r4t$bg$statistic),3)),
+#                 "Shapiro-Wilk",
+#                 as.character(round(as.numeric(r1t$sw$statistic),3)),
+#                 as.character(round(as.numeric(r2t$sw$statistic),3)),
+#                 as.character(round(as.numeric(r3t$sw$statistic),3)),
+#                 as.character(round(as.numeric(r4t$sw$statistic),3)),
+#                 "PSS F",'-','-','-',F.stat,
+#                 "PSS t",'-','-','-',t.stat)
+
+# Using simpler alternative
+rows_r <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+                "Breusch-Godfrey", 
+                summarize_tests(r1t)[1],
+                summarize_tests(r2t)[1],
+                summarize_tests(r3t)[1],
+                summarize_tests(r4t)[1],
+                "Shapiro-Wilk",
+                summarize_tests(r1t)[2],
+                summarize_tests(r2t)[2],
+                summarize_tests(r3t)[2],
+                summarize_tests(r4t)[2],
+                "PSS F",'-','-','-',summarize_bounds(recruit.bounds)[1],
+                "PSS t",'-','-','-',summarize_bounds(recruit.bounds)[2])
+
+# Use coef_map to impose order and rename variables
+coef_names_r <- c( # Vector of variable names
+    "l.1.log.recruits" = "Recruitment (lag)",
+    "l.1.log.supporters" = "Support (lag)",
+    "l.1.log.posts" = "Activity (lag)",
+    "l.1.log.comments" = "Comments (lag)",
+    "l.1.log.shares" = "Shares (lag)",
+    "d.1.log.posts" = "$\\Delta$ Activity",
+    "d.1.log.comments" = "$\\Delta$ Comments",
+    "d.1.log.shares" = "$\\Delta$ Shares",
+    "d.1.M_motivational" = "$\\Delta$ Motivational",
+    "d.1.M_repression" = "$\\Delta$ Repression",
+    "d.1.M_promotional" = "$\\Delta$ Promotional",
+    "d.1.T_protests" = "$\\Delta$ Protests",
+    "d.1.M_islam" ="$\\Delta$ Islam",
+    "d.1.M_terrorism" ="$\\Delta$ Terrorism",
+    "d.1.M_immigration"="$\\Delta$ Immigration",
+    "d.1.M_politics"="$\\Delta$ Politics",
+    "d.1.T_crime"="$\\Delta$ Crime",
+    "d.1.T_military"="$\\Delta$ Military",
+    "l.1.M_motivational"="Motivational (lag)",
+    "l.1.M_repression"= "Repression (lag)",
+    "l.1.M_promotional"= "Promotional (lag)",
+    "l.1.T_protests"= "Protests (lag)",
+    "l.1.M_islam"= "Islam (lag)",
+    "l.1.M_terrorism"= "Terrorism (lag)",
+    "l.1.M_immigration"= "Immigration (lag)",
+    "l.1.M_politics"= "Politics (lag)",
+    "l.1.T_crime"= "Crime (lag)",
+    "l.1.T_military"= "Military (lag)",
+    "d.1.media" = "$\\Delta$ Media",
+    "l.1.media" = "Media (lag)",
+    "elections.lead"= "Elections (lead)",
+    "elections"= "Elections",
+    "elections.lag" = "Elections (lag)",
+    "post_brexit" = "Post-Brexit",
+    "attacks" = "Terrorist attack",
+    "attacks.lag" = "Terrorist attack (lag)",
+    "cox_murder" = "Cox murder",
+    "cox_murder.lag"= "Cox murder (lag)",
+    "actions" = "Direct actions",
+    "actions.lag" = "Direct actions (lag)",
+    "protests.lead" = "BF protests (lead)",
+    "protests" = "BF protests",
+    "protests.lag" = "BF protests (lag)",
+    "trendvar" = "Trend",
+    "(Intercept)" = "Intercept"
+)  
+
+modelsummary(list(recruit1$model, recruit2$model, recruit3$model, recruit4$model), stars = c("*" = 0.05, "**" = 0.01, "***" = 0.001), coef_map = coef_names_r, gof_omit = "AIC|BIC|Log.Lik.|RMSE", fmt = 2, add_rows = rows_r, title = "ECM predicting weekly change in Britain First's online recruitment", output = "../tables/recruitment_table.docx")
+```
+
+
+# SUPPORT MODELS
+```{r modeling support}
+support1 <- dynardl(log.supporters ~ log.posts + log.comments + log.shares,
+                        data = df,
+                        lags = list('log.posts' = 1, 'log.supporters' = 1, 'log.comments' = 1, 'log.shares' = 1),
+                        diffs = c('log.posts', 'log.comments', 'log.shares'),
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+s1t <- dynardl.auto.correlated(support1, object.out = T)
+
+lags_social_and_topics_s <- list('log.posts' = 1, 'log.supporters' = 1, 'log.comments' = 1, 
+                                    'log.shares' = 1,
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                               'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 'M_immigration' = 1, 
+                                    'M_politics' = 1, 'T_crime' = 1, 
+                                    'T_military' = 1)
+diffs_social_and_topics_s <- c('log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 'T_protests',
+                                    'M_islam', 'M_terrorism', 'M_immigration', 'M_politics',
+                               'T_crime', 'T_military')
+
+support2 <- dynardl(log.supporters ~ log.posts + log.comments + log.shares + M_motivational + 
+                         M_repression + M_promotional + T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                        data = df,
+                        lags = lags_social_and_topics_s,
+                        diffs = diffs_social_and_topics_s,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+s2t <- dynardl.auto.correlated(support2, object.out = T)
+
+lags_social_and_media_s <- list('log.posts' = 1,  'media' = 1,   'log.supporters' = 1,
+                                'log.comments' = 1, 'log.shares' = 1)
+diffs_social_and_media_s <- c('media', 'log.posts', 'log.comments', 'log.shares')
+events <- c('elections.lead', 'elections', 'elections.lag', 
+                               'attacks', 'attacks.lag', 'cox_murder', 
+                               'cox_murder.lag', 'actions', 'actions.lag', 
+                                'protests.lead', 'protests', 'protests.lag',
+                                   'post_brexit')
+
+support3 <- dynardl(log.supporters ~ log.posts + media + log.comments + log.shares + elections + elections.lag +
+                         elections.lead + attacks + attacks.lag + cox_murder  + cox_murder.lag + actions + 
+                         actions.lag + protests.lead + protests + protests.lag + post_brexit,
+                        data = df,
+                        lags = lags_social_and_media_s,
+                        diffs = diffs_social_and_media_s,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+s3t <- dynardl.auto.correlated(support3, object.out = T)
+
+lags_full_s <- list('log.posts' = 1,  'media' = 1, 'log.supporters' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1)
+diffs_full_s <- c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military')
+
+support4 <- dynardl(log.supporters ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                        data = df,
+                        lags = lags_full_s,
+                        diffs = diffs_full_s,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+support.formula.final <- as.formula("log.supporters ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration")
+
+s4t <- dynardl.auto.correlated(support4, object.out = T)
+
+support.bounds <- pssbounds(support4, object.out = T) # I(1)
+
+
+
+shapiro.test(support4$model$residuals)
+ks.test(support4$model$residuals, "pnorm", mean = mean(support4$model$residuals), sd = sqrt(var(support4$model$residuals)), exact=F) # alternative test
+jarque.bera.test(support4$model$residuals)
+
+pdf("../figures/residuals_support.pdf", width = 6.3, height = 5)
+par(mfrow=c(3,1))
+ts.plot(support4$model$residuals, gpars = list(ylab='Residual'))
+hist(support4$model$residuals, breaks=25, xlab="Residual", main="")
+qqnorm(support4$model$residuals, main="")
+qqline(support4$model$residuals)
+dev.off()
+
+####
+```
+
+```{r supporter sims}
+## Now to run a simulation
+supporters.sim.posts <- dynardl(support.formula.final,
+                        data = df,
+                        lags = lags_full_s,
+                        diffs = diffs_full_s,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.posts",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+supporters.sim.comments <- dynardl(support.formula.final,
+                        data = df,
+                        lags = lags_full_s,
+                        diffs = diffs_full_s,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.comments",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+
+supporters.sim.shares <- dynardl(support.formula.final,
+                        data = df,
+                        lags = lags_full_s,
+                        diffs = diffs_full_s,
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F, # No need for output here
+                        simulate = T,
+                     shockvar = "log.shares",
+                     time=5, # time to shock DV
+                     range=13, sims = 10000, 
+                     expectedval = FALSE
+                        )
+
+
+supporters.sim.posts$simulation <- supporters.sim.posts$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+supporters.sim.comments$simulation <- supporters.sim.comments$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+supporters.sim.shares$simulation <- supporters.sim.shares$simulation %>%
+    mutate_all(exp) %>% mutate(time = log(time),
+                               shocktime = log(shocktime))
+ymax.s <- max(supporters.sim.shares$simulation$ul95+10000) # Added correction otherwise plot overlaps with axis
+ymin.s <- min(supporters.sim.posts$simulation$ll95)
+pdf("../figures/support_sims_final.pdf", width = 6.3, height = 4)
+par(mfrow=c(1,3))
+dynardl.simulation.plot(supporters.sim.posts, type="area", response="levels", ylab="Support", main='Posts', xlab="", ylim = c(ymin.s, ymax.s))
+dynardl.simulation.plot(supporters.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="Time", ylim = c(ymin.s, ymax.s))
+dynardl.simulation.plot(supporters.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.s, ymax.s))
+dev.off()
+```
+
+
+```{r support regression tables}
+# t.stat <- paste("(", support.bounds$ttest.I0.p05, ", ", support.bounds$ttest.I1.p05, ")", " ", round(support.bounds$tstat,2), sep = "")
+# F.stat <- paste("(", support.bounds$ftest.I0.p05, ", ", support.bounds$ftest.I1.p05, ")", " ", round(support.bounds$fstat,2), sep = "")
+# 
+# # https://vincentarelbundock.github.io/modelsummary/articles/modelsummary.html#add_rows
+# rows <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+#                 "Breusch-Godfrey", 
+#                 as.character(round(as.numeric(s1t$bg$statistic),3)),
+#                 as.character(round(as.numeric(s2t$bg$statistic),3)),
+#                 as.character(round(as.numeric(s3t$bg$statistic),3)),
+#                 as.character(round(as.numeric(s4t$bg$statistic),3)),
+#                 "Shapiro-Wilk",
+#                 as.character(round(as.numeric(s1t$sw$statistic),3)),
+#                 as.character(round(as.numeric(s2t$sw$statistic),3)),
+#                 as.character(round(as.numeric(s3t$sw$statistic),3)),
+#                 as.character(round(as.numeric(s4t$sw$statistic),3)),
+#                 "PSS F",'-','-','-',F.stat,
+#                 "PSS t",'-','-','-',t.stat)
+
+rows_s <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+                "Breusch-Godfrey", 
+                summarize_tests(s1t)[1],
+                summarize_tests(s2t)[1],
+                summarize_tests(s3t)[1],
+                summarize_tests(s4t)[1],
+                "Shapiro-Wilk",
+                summarize_tests(s1t)[2],
+                summarize_tests(s2t)[2],
+                summarize_tests(s3t)[2],
+                summarize_tests(s4t)[2],
+                "PSS F",'-','-','-',summarize_bounds(support.bounds)[1],
+                "PSS t",'-','-','-',summarize_bounds(support.bounds)[2])
+
+# Use coef_map to impose order and rename variables
+coef_names_s <- c( # Vector of variable names
+    "l.1.log.supporters" = "Support (lag)",
+    "l.1.log.posts" = "Activity (lag)",
+    "l.1.log.comments" = "Comments (lag)",
+    "l.1.log.shares" = "Shares (lag)",
+    "d.1.log.posts" = "$\\Delta$ Activity",
+    "d.1.log.comments" = "$\\Delta$ Comments",
+    "d.1.log.shares" = "$\\Delta$ Shares",
+    "d.1.M_motivational" = "$\\Delta$ Motivational",
+    "d.1.M_repression" = "$\\Delta$ Repression",
+    "d.1.M_promotional" = "$\\Delta$ Promotional",
+    "d.1.T_protests" = "$\\Delta$ Protests",
+    "d.1.M_islam" ="$\\Delta$ Islam",
+    "d.1.M_terrorism" ="$\\Delta$ Terrorism",
+    "d.1.M_immigration"="$\\Delta$ Immigration",
+    "d.1.M_politics"="$\\Delta$ Politics",
+    "d.1.T_crime"="$\\Delta$ Crime",
+    "d.1.T_military"="$\\Delta$ Military",
+    "l.1.M_motivational"="Motivational (lag)",
+    "l.1.M_repression"= "Repression (lag)",
+    "l.1.M_promotional"= "Promotional (lag)",
+    "l.1.T_protests"= "Protests (lag)",
+    "l.1.M_islam"= "Islam (lag)",
+    "l.1.M_terrorism"= "Terrorism (lag)",
+    "l.1.M_immigration"= "Immigration (lag)",
+    "l.1.M_politics"= "Politics (lag)",
+    "l.1.T_crime"= "Crime (lag)",
+    "l.1.T_military"= "Military (lag)",
+    "d.1.media" = "$\\Delta$ Media",
+    "l.1.media" = "Media (lag)",
+    "elections.lead"= "Elections (lead)",
+    "elections"= "Elections",
+    "elections.lag" = "Elections (lag)",
+    "post_brexit" = "Post-Brexit",
+    "attacks" = "Terrorist attack",
+    "attacks.lag" = "Terrorist attack (lag)",
+    "cox_murder" = "Cox murder",
+    "cox_murder.lag"= "Cox murder (lag)",
+    "actions" = "Direct actions",
+    "actions.lag" = "Direct actions (lag)",
+    "protests.lead" = "BF protests (lead)",
+    "protests" = "BF protests",
+    "protests.lag" = "BF protests (lag)",
+    "trendvar" = "Trend",
+    "(Intercept)" = "Intercept"
+)  
+
+modelsummary(list(support1$model, support2$model, support3$model, support4$model), stars = c("*" = 0.05, "**" = 0.01, "***" = 0.001), coef_map = coef_names_s, gof_omit = "AIC|BIC|Log.Lik.|RMSE", fmt = 2, add_rows = rows_s, title = "ECM predicting weekly change in Britain First's online support", output = "../tables/support_table.docx")
+```
+
+## COMBINING SIMULATIONS
+This code combines simulation results into a single figure.
+```{r final simulation figure}
+# Final figure for publication, all subplots in greyscale
+pdf("../figures/combined_sims_final.pdf")
+par(mfrow=c(3,3))
+dynardl.simulation.plot(resids.posts.sim.likes, type="area", response="levels", ylab="Activity", main='Likes', xlab="", ylim = c(ymin.p, ymax.p), bw = T)
+dynardl.simulation.plot(resids.posts.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="", ylim = c(ymin.p, ymax.p), bw = T)
+dynardl.simulation.plot(resids.posts.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.p, ymax.p), bw = T)
+dynardl.simulation.plot(recruits.sim.posts, type="area", response="levels", ylab="Recruitment", main='Posts', xlab="", ylim = c(ymin.r, ymax.r), bw = T)
+dynardl.simulation.plot(recruits.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="", ylim = c(ymin.r, ymax.r), bw = T)
+dynardl.simulation.plot(recruits.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.r, ymax.r), bw = T)
+dynardl.simulation.plot(supporters.sim.posts, type="area", response="levels", ylab="Support", main='Posts', xlab="", ylim = c(ymin.s, ymax.s), bw = T)
+dynardl.simulation.plot(supporters.sim.comments, type="area", response="levels", ylab="", main='Comments', xlab="Time", ylim = c(ymin.s, ymax.s), bw = T)
+dynardl.simulation.plot(supporters.sim.shares, type="area", response="levels", ylab="", main="Shares", xlab="", ylim = c(ymin.s, ymax.s), bw = T)
+dev.off()
+```
+
+
+# ROBUSTNESS CHECKS
+Running code for robustness checks reported in online appendix.
+```{r robustness checks}
+recruits.alt <- read_csv("../data/bf_weekly_recruitment_inc_reactions.csv")
+colnames(recruits.alt) <- c("date", "recruits_alt")
+
+supporters.alt <- read_csv("../data/bf_weekly_support_inc_reactions.csv")
+colnames(supporters.alt) <- c("date", "supporters_alt")
+
+df2 <- df %>% left_join(supporters.alt, by = "date") %>%
+    left_join(recruits.alt, by = "date")
+
+df2$log.recruits_alt <- log(df2$recruits_alt)
+df2$log.supporters_alt <- log(df2$supporters_alt)
+
+# Alternative outcomes 
+recruit.alt <- dynardl(log.recruits_alt ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'media' = 1, 'log.recruits_alt' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc1t <- dynardl.auto.correlated(recruit.alt, object.out = T)
+
+support.alt <- dynardl(log.supporters_alt ~ log.posts + media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'media' = 1, 'log.supporters_alt' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc2t <- dynardl.auto.correlated(support.alt, object.out = T)
+
+# Alternative topic covariates
+df.no_topics <- df %>% select(-matches("T_")) %>% select(-matches("M_"))
+
+topics.alt <- read.csv("../data/weekly_topic_and_cluster_counts_30topic_deduped.csv") %>% mutate(week = ymd(week))
+
+df.mod <- df.no_topics %>% left_join(topics.alt, by = c("date" = "week"))
+
+recruit.topic_counts <- dynardl(log.recruits ~ log.posts +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,
+                                     'media' = 1, 'log.recruits' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc3t <- dynardl.auto.correlated(recruit.topic_counts, object.out = T)
+
+support.topic_counts <- dynardl(log.supporters ~  log.posts +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,
+                                     'media' = 1, 'log.supporters' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc4t <- dynardl.auto.correlated(support.topic_counts, object.out = T)
+
+# Added photo and video
+recruit.av <- dynardl(log.recruits ~ log.posts + log.video + log.photo +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'log.video' = 1,
+                                     'log.photo' = 1,
+                                     'media' = 1, 'log.recruits' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                  'log.photo', 'log.video',
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc5t <- dynardl.auto.correlated(recruit.av, object.out = T)
+
+support.av <- dynardl(log.supporters ~  log.posts + log.video + log.photo +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'log.video' = 1,
+                                     'log.photo' = 1,
+                                     'media' = 1, 'log.supporters' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                  'log.photo', 'log.video',
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc6t <- dynardl.auto.correlated(support.av, object.out = T)
+
+# Added engagement bait
+# Note: Also tried with non-transformed variable but results unchanged
+recruit.eb <- dynardl(log.recruits ~ log.posts + log.eb +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         log.eb +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'log.eb' = 1,
+                                     'media' = 1, 'log.recruits' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                  'log.eb', 
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+
+rc7t <- dynardl.auto.correlated(recruit.eb, object.out = T)
+
+support.eb <- dynardl(log.supporters ~  log.posts + log.eb +
+                          media + log.comments + 
+                         log.shares + elections + elections.lag + 
+                         elections.lead + attacks + attacks.lag +
+                         cox_murder  + cox_murder.lag + actions + actions.lag +
+                         protests.lead + protests + protests.lag + post_brexit +
+                         M_motivational + M_repression + M_promotional +
+                         T_protests + M_islam + M_terrorism + 
+                         M_politics + T_crime + T_military + M_immigration,
+                         data = df2,
+                         lags = list('log.posts' = 1,  'log.eb' = 1,
+                                     'media' = 1, 'log.supporters' = 1, 
+                                    'log.comments' = 1,'log.shares' = 1, 
+                                    'M_motivational' = 1, 'M_repression' = 1, 
+                                     'M_promotional' = 1, 'T_protests' = 1,
+                                    'M_islam' = 1, 'M_terrorism' = 1, 
+                                    'M_immigration' = 1, 'M_politics' = 1, 
+                                    'T_crime' = 1, 'T_military' = 1),
+                        diffs = c('media', 'log.posts', 'log.comments', 'log.shares', 
+                                  'log.eb',
+                                 'M_motivational', 'M_repression', 'M_promotional', 
+                                  'T_protests', 'M_islam', 'M_terrorism', 'M_immigration', 
+                                'M_politics', 'T_crime', 'T_military'),
+                        levels = events,
+                        ec = T,
+                        trend = T,
+                        constant = T,
+                        modelout = F,
+                        simulate = F)
+rc8t <- dynardl.auto.correlated(support.eb, object.out = T)
+```
+
+This chunk produces the two tables with robustness checks.
+```{r robustness table}
+# rows_ro_r <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+#                 "Breusch-Godfrey", 
+#                 as.character(round(as.numeric(rc1t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc3t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc5t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc7t$bg$statistic),3)),
+#                 "Shapiro-Wilk",
+#                 as.character(round(as.numeric(rc1t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc3t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc5t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc7t$sw$statistic),3)))
+
+rows_ro_r <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+                "Breusch-Godfrey", 
+                summarize_tests(rc1t)[1],
+                summarize_tests(rc3t)[1],
+                summarize_tests(rc5t)[1],
+                summarize_tests(rc7t)[1],
+                "Shapiro-Wilk",
+                summarize_tests(rc1t)[2],
+                summarize_tests(rc3t)[2],
+                summarize_tests(rc5t)[2],
+                summarize_tests(rc7t)[2])
+
+# rows_ro_s <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+#                 "Breusch-Godfrey", 
+#                 as.character(round(as.numeric(rc2t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc4t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc6t$bg$statistic),3)),
+#                 as.character(round(as.numeric(rc8t$bg$statistic),3)),
+#                 "Shapiro-Wilk",
+#                 as.character(round(as.numeric(rc2t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc4t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc6t$sw$statistic),3)),
+#                 as.character(round(as.numeric(rc8t$sw$statistic),3)))
+
+rows_ro_s <- tribble(~term, ~Model1, ~Model2, ~Model3, ~Model4,
+                "Breusch-Godfrey", 
+                summarize_tests(rc2t)[1],
+                summarize_tests(rc4t)[1],
+                summarize_tests(rc6t)[1],
+                summarize_tests(rc8t)[1],
+                "Shapiro-Wilk",
+                summarize_tests(rc2t)[2],
+                summarize_tests(rc4t)[2],
+                summarize_tests(rc6t)[2],
+                summarize_tests(rc8t)[2])
+
+# Use coef_map to impose order and rename variables
+coef_names_rc <- c( # Vector of variable names
+    "l.1.log.recruits" = "Recruitment (lag)",
+    "l.1.log.recruits_alt" = "Recruitment Alt. (lag)",
+    "l.1.log.supporters" = "Support (lag)",
+    "l.1.log.supporters_alt" = "Support Alt. (lag)",
+    "l.1.log.posts" = "Activity (lag)",
+    "l.1.log.comments" = "Comments (lag)",
+    "l.1.log.shares" = "Shares (lag)",
+    "l.1.log.photo" = "Photo posts (lag)",
+    "l.1.log.video" = "Video posts (lag)",
+    "l.1.log.eb" = "Engagement bait (lag)",
+    "d.1.log.posts" = "$\\Delta$ Activity",
+    "d.1.log.comments" = "$\\Delta$ Comments",
+    "d.1.log.shares" = "$\\Delta$ Shares",
+    "d.1.log.photo" = "$\\Delta$Photo posts",
+    "d.1.log.video" = "$\\Delta$ Video posts",
+    "d.1.log.eb" = "$\\Delta$ Engagement bait",
+    "d.1.M_motivational" = "$\\Delta$ Motivational",
+    "d.1.M_repression" = "$\\Delta$ Repression",
+    "d.1.M_promotional" = "$\\Delta$ Promotional",
+    "d.1.T_protests" = "$\\Delta$ Protests",
+    "d.1.M_islam" ="$\\Delta$ Islam",
+    "d.1.M_terrorism" ="$\\Delta$ Terrorism",
+    "d.1.M_immigration"="$\\Delta$ Immigration",
+    "d.1.M_politics"="$\\Delta$ Politics",
+    "d.1.T_crime"="$\\Delta$ Crime",
+    "d.1.T_military"="$\\Delta$ Military",
+    "l.1.M_motivational"="Motivational (lag)",
+    "l.1.M_repression"= "Repression (lag)",
+    "l.1.M_promotional"= "Promotional (lag)",
+    "l.1.T_protests"= "Protests (lag)",
+    "l.1.M_islam"= "Islam (lag)",
+    "l.1.M_terrorism"= "Terrorism (lag)",
+    "l.1.M_immigration"= "Immigration (lag)",
+    "l.1.M_politics"= "Politics (lag)",
+    "l.1.T_crime"= "Crime (lag)",
+    "l.1.T_military"= "Military (lag)",
+    "d.1.media" = "$\\Delta$ Media",
+    "l.1.media" = "Media (lag)",
+    "elections.lead"= "Elections (lead)",
+    "elections"= "Elections",
+    "elections.lag" = "Elections (lag)",
+    "post_brexit" = "Post-Brexit",
+    "attacks" = "Terrorist attack",
+    "attacks.lag" = "Terrorist attack (lag)",
+    "cox_murder" = "Cox murder",
+    "cox_murder.lag"= "Cox murder (lag)",
+    "actions" = "Direct actions",
+    "actions.lag" = "Direct actions (lag)",
+    "protests.lead" = "BF protests (lead)",
+    "protests" = "BF protests",
+    "protests.lag" = "BF protests (lag)",
+    "trendvar" = "Trend",
+    "(Intercept)" = "Intercept"
+)  
+
+modelsummary(list("Reactions" = recruit.alt$model, "Topics" = recruit.topic_counts$model, "AV" = recruit.av$model, "EB" = recruit.eb$model), stars = c("*" = 0.05, "**" = 0.01, "***" = 0.001), coef_map = coef_names_rc, gof_omit = "AIC|BIC|Log.Lik.|RMSE", fmt = 2, add_rows = rows_ro_r, title = "Recruitment robustness checks", output = "../tables/recruitment_robustness_table.docx") # 
+
+modelsummary(list("Reactions" = support.alt$model, "Topics" = support.topic_counts$model, "AV" = support.av$model, "EB" =support.eb$model), stars = c("*" = 0.05, "**" = 0.01, "***" = 0.001), coef_map = coef_names_rc, gof_omit = "AIC|BIC|Log.Lik.|RMSE", fmt = 2, add_rows = rows_ro_s, title = "Support robustness checks", output = "../tables/support_robustness_table.docx") # 
+
+```

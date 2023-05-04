@@ -1,0 +1,261 @@
+---
+title: 'Audience Engagement and Online Activism'
+author: |
+  | Thomas Davidson
+  | Rutgers University
+fontsize: 12pt
+output:
+  pdf_document: default
+header-includes: \usepackage{setspace}\doublespacing
+indent: yes
+geometry: margin=1in
+
+---
+
+This script is used to make plots for the main paper and supplementary materials. Plots based on regression results are created in other scripts.
+
+# LOADING PACKAGES AND DATA
+```{r, warning=FALSE, message=FALSE, error=FALSE, echo=FALSE, fig.height=2.7, fig.width=7, cache=FALSE}
+require(ggplot2)
+require(lubridate)
+require(tidyverse)
+require(reshape2)
+require(ggpubr)
+require(latex2exp)
+require(scico)
+require(extrafont)
+
+set.seed(05841)
+
+options(scipen=999)
+options(digits=3)
+options(xtable.comment = FALSE)
+
+loadfonts(device = c("all"))
+
+# Defining custom ggplot2 theme to use times new roman font in all plots, must be called for each (sub)plot
+th <- theme(axis.title.y = element_text(size = 10, family = "Times New Roman"),
+          axis.text.y = element_text(size = 10, family = "Times New Roman"),
+          axis.title.x = element_text(size = 10, family = "Times New Roman"),
+          axis.text.x = element_text(size = 10, family = "Times New Roman"),
+          legend.text = element_text(size = 10, family = "Times New Roman"))
+```
+
+This is the final dataset created by running `main_results.Rmd`.
+```{r loading data}
+data <- read_csv('../data/weekly_dataset.csv')
+```
+
+# EVENT TIMING PLOT 
+```{r events heatmap}
+# Creating new variable combining lads, leads, and event
+# Using pmin to avoid double-counting overlaps for protests
+# Then adding +1 for event so it can be highlighted
+events <- data %>% mutate(elections_all = elections + elections.lag + elections.lead,
+                          cox_all = cox_murder + cox_murder.lag,
+                          protests_all = pmin(protests + protests.lag + protests.lead,1),
+                          attacks_all = attacks + attacks.lag,
+                          actions_all = actions + actions.lag) %>%
+    mutate(aa_elections_all = elections_all + elections,
+           ad_protests_all = protests_all + protests,
+           ab_attacks_all = attacks_all + attacks,
+           ae_actions_all = actions_all + actions,
+           ac_cox_all = cox_all + cox_murder) %>%
+    select(date, aa_elections_all, ab_attacks_all,ac_cox_all,
+           ae_actions_all, ad_protests_all)
+# Melt these to construct plot
+melted <- melt(events, id.vars = c("date")) %>%
+    mutate(value = as.factor(value))
+    
+melted$value <- recode_factor(melted$value, `0` = " ", `1` = "Lead/lag", `2` = "Event")
+
+ggplot(melted, aes(x = date, y = variable, fill = value)) + geom_tile() +
+    scale_fill_manual(values = c("white", "darkgrey", "black")) +
+    labs(y = "", x = "", fill = "") + theme_classic() +
+    scale_y_discrete(labels = rev(c('Britain First protests', 'Britain First actions', 'Jo Cox murder', 'Islamist terrorism', 'National elections'))) +
+    scale_x_date(date_breaks="1 year", date_labels="%Y", date_minor_breaks = "1 month") +
+    th
+
+ggsave("../figures/event_plot_heatmap.pdf", width = 6.3, height =3,  device = cairo_pdf)
+```
+
+
+# DESCRIPTIVE TIME SERIES PLOT
+```{r plotting posts series}
+data <- data %>% mutate(
+    posts.diff = log(posts) - log(dplyr::lag(posts)),
+    supporters.diff = log(supporters) - log(dplyr::lag(supporters)),
+    recruits.diff = log(recruits) - log(dplyr::lag(recruits))
+)
+
+
+
+p1 <- ggplot(data = data, aes(y = posts, x = date)) + geom_line() + scale_y_log10() +
+    theme_classic() + labs(x = "", y = "Activity") + theme(axis.text.x  = element_blank()) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.5, color = "black")  +
+    th
+p2 <- ggplot(data = data, aes(y = recruits, x = date)) + geom_line() + scale_y_log10() +
+    theme_classic() + labs(x = "", y = "Recruitment") + theme(axis.text.x  = element_blank()) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth =0.5, color = "black")  +
+    th
+p3 <- ggplot(data = data, aes(y = supporters, x = date)) + geom_line() + scale_y_log10() +
+    theme_classic() + labs(x = "", y = "Support") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.5, color = "black")  +
+    th
+p1d <- ggplot(data = data, aes(y = posts.diff, x = date)) + geom_line() +
+    theme_classic() + labs(x = "", y=TeX("$\\Delta$ Activity"))  + theme(axis.text.x  = element_blank()) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.5, color = "black")  +
+    th
+p2d <- ggplot(data = data, aes(y = recruits.diff, x = date)) + geom_line() +
+    theme_classic() + labs(x = "", y= TeX("$\\Delta$ Recruitment")) + theme(axis.text.x  = element_blank()) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.5, color = "black")  +
+    th
+p3d <- ggplot(data = data, aes(y = supporters.diff, x = date)) + geom_line() +
+    theme_classic() + labs(x = "", y=TeX("$\\Delta$ Support")) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.5, color = "black")  +
+    th
+ggarrange(p1, p1d, p2,p2d, p3, p3d, nrow=3, ncol=2, common.legend = T, legend="right", align="v")
+ggsave("../figures/time_series_plot.pdf", width = 6.3, height =5, device = cairo_pdf)
+```
+
+# TOPIC MODEL PLOT
+I also include code to construct a color version and some alternatives.
+```{r topic vis}
+topics <- data %>% select(date, M_terrorism, M_islam, M_politics, M_immigration, T_crime, T_military, M_motivational, M_repression, M_promotional, T_protests) %>% 
+    mutate(Other = 100 - rowSums(across(contains("_")))
+    
+)
+
+melted <- melt(topics, id.vars = c("date"))
+
+# Creating first area plot
+ggplot(data=melted, aes(x = date, y=value, fill = variable)) +
+    geom_area(color = "white", size = 0.25) +
+    scale_fill_scico_d(palette = "grayC", labels = c("Terrorism (M)", "Islam (M)", "Politics (M)", 
+                                 "Immigration (M)", "Crime (T)", "Military (T)",
+                                 "Motivational (M)", "Repression (M)", 
+                                 "Promotional (M)", "Protests (T)", "Other"),
+                       direction = -1) + 
+    labs(y = "Topic percentage", x = "",
+                                  fill = "") + theme_classic() + th
+ggsave("../figures/topic_dists_area.pdf", width = 6.3, height =4, device = cairo_pdf)
+
+# Making a smoothed version (reported in final manuscript)
+topics_smoothed <- topics %>% mutate(year_month = format(as_date(date), "%Y-%m")) %>% group_by(year_month) %>% summarize_all(mean) %>%
+    select(!date)
+melted_s <- melt(topics_smoothed, id.vars = c("year_month")) %>%
+    mutate(date = ym(year_month))
+
+ggplot(data=melted_s, aes(x = date, y=value, fill = variable)) +
+    geom_area(color = "white", size = 0.25) +
+    scale_fill_scico_d(palette = "grayC", labels = c("Terrorism (M)", "Islam (M)", "Politics (M)", 
+                                 "Immigration (M)", "Crime (T)", "Military (T)",
+                                 "Motivational (M)", "Repression (M)", 
+                                 "Promotional (M)", "Protests (T)", "Other"),
+                       direction = -1) + 
+    labs(y = "Topic percentage", x = "",
+                                  fill = "") + theme_classic() + th
+
+
+ggsave("../figures/topic_dists_area_smoothed.pdf", width = 6.3, height =4, device = cairo_pdf)
+
+# Uncomment and run for alternative (original version using bars)
+
+# ggplot(data=melted, aes(x = date, y=value, fill = variable)) +
+#     geom_col(position = "stack", width=7, alpha = 1) +
+#     scale_fill_scico_d(palette = "grayC", labels = c("Terrorism (M)", "Islam (M)", "Politics (M)", 
+#                                  "Immigration (M)", "Crime (T)", "Military (T)",
+#                                  "Motivational (M)", "Repression (M)", 
+#                                  "Promotional (M)", "Protests (T)", "Other"),
+#                        direction = -1) + 
+#     labs(y = "Topic percentage", x = "",
+#                                   fill = "") + theme_classic() + th
+# ggsave("../figures/topic_dists_bars.pdf", width = 6.3, height =4, device = cairo_pdf)
+
+# Uncomment and run for a color version that is a lot easier to read! (Uses stacked bars rather than area)
+
+# ggplot(data=melted, aes(x = date, y=value, fill = variable)) +
+#     geom_col(position = "stack", width=7, alpha = 1) + theme_classic() +
+#     scale_fill_scico_d(palette = "roma", labels = c("Terrorism (M)", "Islam (M)", "Politics (M)", 
+#                                 "Immigration (M)", "Crime (T)", "Military (T)",
+#                                 "Motivational (M)", "Repression (M)", 
+#                                 "Promotional (M)", "Protests (T)", "Other")) + 
+#     labs(y = "Topic percentage", x = "",
+#                                   fill = "") + th
+# ggsave("../figures/topic_dists_color.pdf", width = 6.3, height =4, device = cairo_pdf)
+```
+
+
+# Supplementary plots
+
+Note: No changes to font or coloring here as these figures only appear in online appendix
+
+# ENGAGEMENT TYPES
+```{r plotting posts series}
+reactions <- data %>% select(date, likes, shares, comments, angry, haha, wow, sad, angry, love)
+melted <- melt(reactions, id.vars = c("date"))
+
+weekly.counts <- melted %>% group_by(date) %>% summarize(total = sum(value))
+
+melted <- melted %>% left_join(weekly.counts, by = "date") %>%
+    mutate(prop = value / total)
+
+ggplot(data=melted, aes(x = date, y=prop, fill = variable)) +
+    geom_col(position = "fill", width=7) + theme_classic() +
+    scale_fill_viridis_d(option = "turbo") + labs(y = "Proportion of engagements", x = "",
+                                  fill = "")
+ggsave("../figures/reaction_types.pdf")
+ggplot(data=melted %>% filter(variable != "comments" & variable != "shares"), aes(x = date, y=prop, fill = variable)) +
+    geom_col(position = "fill", width=7) + theme_classic() +
+    scale_fill_viridis_d(option = "turbo") + labs(y = "Proportion of engagements", x = "",
+                                  fill = "")
+
+ggsave("../figures/reaction_types_limited.pdf")
+```
+
+# MAIN SERIES INCLUDING REACTIONS
+```{r reactions comparison}
+# Comparing key metrics with and without reactions
+recruits.likes <- read_csv("../data/bf_weekly_recruitment.csv")
+colnames(recruits.likes) <- c("date", "recruits_l")
+
+recruits.all <- read_csv("../data/bf_weekly_recruitment_inc_reactions.csv")
+colnames(recruits.all) <- c("date", "recruits_r")
+#supporters <- supporters %>% 
+#    mutate(date = mdy(date))
+supporters.all <- read_csv("../data/bf_weekly_support.csv")
+colnames(supporters.all) <- c("date", "supporters_r")
+
+supporters.likes <- read_csv("../data/bf_weekly_support_inc_reactions.csv")
+colnames(supporters.likes) <- c("date", "supporters_l")
+
+
+# supporters
+recruits <- recruits.likes %>% left_join(recruits.all, by = "date") %>% filter(date >= "2014-04-01")
+
+#ggplot(data = recruits, aes(y = recruits_l - recruits_r, x = date)) + geom_line() +
+#    theme_classic() + labs(x = "", y= "Difference (Likes vs. Reactions)")
+
+rm <- melt(recruits, id.vars = c("date")) %>%
+    mutate(variable = recode(variable, "recruits_l" = "Likes only", "recruits_r" = "All reactions"))
+
+R <- ggplot(data = rm, aes(y = value, x = date, group = variable, linetype = variable)) + geom_line() +
+    theme_classic() + labs(x = "", y= "Recruitment", linetype = "") + scale_y_log10()
+
+# Support
+supporters <- supporters.likes %>% left_join(supporters.all, by = "date") %>% filter(date >= "2014-04-01")
+
+#ggplot(data = supporters, aes(y = supporters_l - supporters_r, x = date)) + geom_line() +
+#    theme_classic() + labs(x = "", y= "Difference (Likes vs. Reactions)")
+
+sm <- melt(supporters, id.vars = c("date")) %>%
+    mutate(variable = recode(variable, "supporters_l" = "Likes only", "supporters_r" = "All reactions"))
+
+S <- ggplot(data = sm, aes(y = value, x = date, group = variable, linetype = variable)) + geom_line() +
+    theme_classic() + labs(x = "", y= "Support", linetype = "") + scale_y_log10()
+
+ggarrange(R, S, nrow=2, ncol=1, common.legend = T, legend="right", align="v")
+ggsave("../figures/outcomes_by_reactions.pdf")
+```
+
+

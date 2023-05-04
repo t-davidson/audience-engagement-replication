@@ -1,0 +1,299 @@
+---
+output: 
+  pdf_document:
+    keep_tex: true
+    fig_caption: yes
+    latex_engine: pdflatex
+geometry: margin=1in
+title: "Audience Engagement and Online Activism"
+header-includes:
+- \usepackage{multicol}
+- \usepackage{caption}
+- \usepackage{hyperref}
+- \captionsetup[figure]{font=scriptsize}
+- \captionsetup[figure]{labelformat=empty}
+- \DeclareUnicodeCharacter{2212}{-}
+---
+
+This script is used to estimate the topic models.
+
+# LOADING PACKAGES AND DATA
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(dev = 'pdf')
+require(knitr)
+require(formatR)
+require(tidyverse)
+require(tidytext)
+require(lubridate)
+require(stm)
+require(reshape2)
+require(viridis)
+
+opts_chunk$set(tidy.opts=list(width.cutoff=80),tidy=TRUE)
+opts_chunk$set(tidy = FALSE)
+
+knitr::knit_hooks$set(mysize = function(before, options, envir) {
+  if (before) 
+    return(options$size)
+})
+```
+
+
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+data <- read.csv("../data/bf_posts_raw.csv")
+
+data$time <- ymd_hms(data$time)
+
+data <- dplyr::filter(data, time > as.Date("2013-10-25") & time < as.Date("2018-03-09")) # Start 10/25/2013
+
+# Getting number for each day to use as covariate in topic model
+date_seq <- seq(as.Date(head(data$time, 1)), as.Date(tail(data$time, 1)), by="days")
+lookup <- tibble(date_seq)
+lookup$id <- 1:length(date_seq)
+colnames(lookup) <- c("date","date_id")
+
+data$date <- as.Date(data$time)
+
+data <- left_join(data, lookup, by = "date") # join date IDs by date
+
+data$week <- floor_date(data$date, "week")
+```
+
+
+# STM
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+# Remove URLS
+data <- data %>%
+    mutate(text = gsub("(http[^ ]*)|(www.[^ ]*)", "", text))
+
+# Remove duplicates
+d <- data[!duplicated(data$text), ] # Removing duplicates before training model
+
+meta <- data.frame(d$date_id) # Specify metadata
+colnames(meta) <- c("date_id")
+processed <- textProcessor(d$text, metadata = meta, stem = FALSE)
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta, lower.thresh = 10)
+```
+
+## Search K
+Run this line to do searchK to estimate models for various different numbers of topics. Note that this could take several hours to complete.
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+set.seed(14850)
+kresult <- searchK(out$documents, out$vocab,
+                   K = c(5,10,15,20,25,30,35,40,45,50),
+                   prevalence = ~ s(date_id),
+                   data = out$meta,
+                   proportion=0.1, # proportion of docs held-out
+                   cores = 8)
+plot(kresult)
+```
+
+## Estimate final model
+
+Estimating a final model with 30 topics.
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+K=30
+fit <- stm(documents = out$documents, vocab = out$vocab, K=K,
+           data = out$meta, verbose = TRUE,
+           prevalence = ~ s(date_id)
+           )
+```
+
+
+## Re-fitting the model with duplicates
+
+Fitting full corpus including duplicates.
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+# Running preprocessing for docs without deduplication
+processed.full <- textProcessor(data$text, metadata = as.data.frame(data$date_id))
+out.full <- prepDocuments(processed.full$documents, processed.full$vocab, processed.full$meta, lower.thres = 5)
+newdocs <- alignCorpus(new=out.full, old.vocab=fit$vocab)
+
+# Fitting new model to the entire corpus
+fit.full <- fitNewDocuments(model=fit, documents=newdocs$documents, newData=as.data.frame(newdocs$meta),
+                origData=out$meta, prevalence = ~ s(out$meta$`data$date_ids`))
+```
+
+## Saving results
+
+This code saves all objects created. It allows the fitted models to be reloaded as necessary
+```{r save, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+save.image("../topic_model/30topic_deduped")
+```
+
+
+# INITIAL ANALYSES
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+# Here is the estimated topic proportion for every document in the corpus
+m <- cbind(fit.full$theta, as.matrix(newdocs$meta))
+colnames(m) <- c(paste("Topic", 1:K,sep="_"), "date_id")
+```
+
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+# For each day
+# Calculate the average topic proportions (for relevant content). It doesn't make sense to divide by all posts since it would imply they have no content to contribute
+daily.topic.proportions.30topic <- left_join(as.data.frame(m), lookup, by="date_id") %>% group_by(date_id, date) %>% summarize_all(mean)
+
+topics <- daily.topic.proportions.30topic
+
+topics <- topics %>% dplyr::select(date_id, date, contains("Topic"))
+
+colnames(topics) <- c("date_id", "date", "T_intl_solidarity", "T_motivational", "T_regions", "T_protests",
+                      "T_terrorism_middle_east", "T_criticism_politicians", "T_military", "T_crime", "T_online_promotion",
+                      "T_trump", "T_bible", "T_criticism_Facebook", "T_elections", "T_immigration", "T_brexit", 
+                      "T_misc_news", "T_email_promotion", "T_terrorism_europe", "T_islam_sex", "T_refugees", "T_self_promotion",
+                      "T_islam_videos", "T_leadership", "T_media_and_aid", "T_merchandise", "T_UKIP_misc", "T_islam_general",
+                      "T_terrorism_general", "T_islam_sharia", "T_misc_values")
+
+
+# Defining topic clusters based on close reading of topics
+
+## Motivational topics, direct motivation and international solidarity
+topics$M_motivational <- topics$T_motivational + topics$T_intl_solidarity + topics$T_self_promotion
+
+## Promotion of Britain First
+topics$M_promotional <- topics$T_online_promotion + topics$T_email_promotion + topics$T_merchandise
+
+## Repression issues: Facebook bans and legal trouble (maybe better to say this is defending BF)
+topics$M_repression <- topics$T_leadership + topics$T_criticism_Facebook
+
+## Islam (Islam and sex abuse, extremism, sharia, halal)
+topics$M_islam <- topics$T_islam_general + topics$T_islam_sex + topics$T_islam_sharia + topics$T_islam_videos
+
+## Terrorism (in the Middle East and Europe)
+topics$M_terrorism <- topics$T_terrorism_europe + topics$T_terrorism_general + topics$T_terrorism_middle_east
+
+## Topics in politics (Trump, the BBC, foreign aid, UKIP), excluding Brexit
+topics$M_politics <- topics$T_trump + topics$T_elections + topics$T_UKIP_misc
+
+## Immigration and the refugee crisis
+topics$M_immigration <- topics$T_immigration + topics$T_refugees
+
+# Total proportion accounted for
+topics$issue_total <- topics$M_islam + topics$M_immigration + topics$M_terrorism + topics$M_politics + topics$T_crime + topics$T_military
+
+topics$instrumental_total <- topics$M_promotional  + topics$M_motivational + topics$M_organizational + topics$T_protests
+
+topics$main_total <- topics$issue_total + topics$instrumental_total
+```
+
+
+# VISUALIZING TOPIC DISTRIBUTIONS OVER TIME
+These exploratory visualizations show how distribution of topics changed over time.
+```{r, echo=FALSE, tidy=FALSE, mysize=TRUE, size='\\footnotesize'}
+
+topics$week <- floor_date(topics$date, "week")
+melted <- melt(topics, id = c("week"))
+
+colnames(melted) <- c("week", "Topic", "value")
+
+melted <- melted %>% dplyr::filter(week < as.Date("2017-05-21"))
+
+# Meta-issues
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c( "M_terrorism", "M_islam", "M_immigration", "M_politics", "T_crime", "T_military")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d() + scale_fill_viridis_d() + theme_bw() + ylim(0, 0.3) +
+   labs(x = "", y = "Average topic proportion", title = "Prevalence of issue topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+# Note that to some extent the differences are arbitrary since some series will be higher as they are composed of multiple topics.
+
+# Islam
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("T_islam_general", "T_islam_sex", "T_islam_sharia", "T_islam_videos")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d() + scale_fill_viridis_d() + theme_bw() + ylim(0, 0.1) +
+   labs(x = "", y = "Average topic proportion", title = "Prevalence of Islam topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+
+# Terrorism
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("T_terrorism_middle_east", "T_terrorism_general", "T_terrorism_europe")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d() + scale_fill_viridis_d() + theme_bw() + ylim(0, 0.1) +
+   labs(x = "", y = "Average topic proportion", title = "Prevalence of Terrorism topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+
+# Immigration and refugees
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("T_refugees", "T_immigration")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d() + scale_fill_viridis_d() + theme_bw() + ylim(0, 0.3) +
+   labs(x = "", y = "Average topic proportion", title = "Prevalence of issue topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+
+# Military and crime
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("T_military", "T_crime", "T_bible")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d() + scale_fill_viridis_d() + theme_bw() + ylim(0, 0.3) +
+   labs(x = "", y = "Average topic proportion", title = "Prevalence of issue topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+
+# Movement-related topics
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("M_promotional", "M_motivational", "M_repression", "T_protests")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d(option="magma") + scale_fill_viridis_d(option="magma") + theme_bw() + ylim(0, 0.3) +
+    labs(x = "", y = "Average topic proportion", title = "Prevalence of instrumental topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+# Set same axis for both. Correct title, caption, and labels.
+
+# Promotional topics
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("T_online_promotion", "T_email_promotion", "T_merchandise")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d(option="magma") + scale_fill_viridis_d(option="magma") + theme_bw() + ylim(0, 0.3) +
+    labs(x = "", y = "Average topic proportion", title = "Prevalence of Promotional topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+# Set same axis for both. Correct title, caption, and labels.
+
+# Total of each kind
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("issue_total", "instrumental_total")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d(option="magma") + scale_fill_viridis_d() + theme_bw() +
+    labs(x = "", y = "Average topic proportion", title = "Prevalence of issue and instrumental topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.")
+
+p <- ggplot(data = melted %>% dplyr::filter(Topic %in% c("main_total")),
+            mapping = aes(x = week,
+                          y = value,
+                          color = Topic,
+                          fill = Topic))
+p + geom_point(alpha=0.1) +
+    geom_smooth(method = "loess") + scale_color_viridis_d(option="magma") + scale_fill_viridis_d() + theme_bw() +
+    labs(x = "", y = "Average topic proportion", title = "Prevalence of issue and instrumental topics in BF's Facebook posts", 
+         caption = "Weekly averages exclude posts without topical content.") + theme(legend.position = "none")
+```
+
+
