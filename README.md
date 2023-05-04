@@ -16,10 +16,10 @@ The code used to run the topic model is contained in `estimate_topic_model.Rmd`.
 ### Main results
 The main time series regression analyses can be reproduced by running `main-results.Rmd`. This script produces Tables 2-4 and Figure 5, as well as additional supplementary material. Note that the tables require some additional formatting to match published versions.
 
-## Post-level results
+### Post-level results
 The negative binomial regression models estimating the effect of topic proportions and engagement bait on engagement can be reproduced by running `post-level-regressions.R`. This produces Figure 6 and the full table reported in the appendix.
 
-## Additional figures
+### Additional figures
 The `additional-visualizations.Rmd` script can be used to recreate Figures 2-4 and additional supplementary figures.
 
 ## Tables and Figures
