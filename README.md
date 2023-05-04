@@ -8,7 +8,7 @@ All necessary data to replicate the results are stored in the `data` directory. 
 The `weekly_dataset.csv` file contains the final version of the data used for time series modeling. The `bf_posts_raw.csv` file contains the original text of BF's Facebook posts.
 
 ## Code
-All code is contained in the `code` directory. Specific instructions are included within each file.
+All code is contained in the `code` directory. Specific instructions are included within each file. The files are either in R or RMarkdown format.
 
 ### Topic models
 The code used to run the topic model is contained in `estimate_topic_model.Rmd`. The fitted model is stored in the `topic_model` directory. The `process-topic-model-results.Rmd` script is used to obtain weekly topic proportions.
