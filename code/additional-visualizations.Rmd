@@ -258,4 +258,23 @@ ggarrange(R, S, nrow=2, ncol=1, common.legend = T, legend="right", align="v")
 ggsave("../figures/outcomes_by_reactions.pdf")
 ```
 
+# Topic correlations
+```{r corr-topics}
+cor_matrix <- cor(data %>% select(M_terrorism, M_islam, M_politics, M_immigration, T_crime, T_military, M_motivational, M_repression, M_promotional, T_protests))
 
+
+melted_cor <- melt(cor_matrix) %>% filter(value != 1)
+
+# Render and save heatmap
+ggplot(data = melted_cor, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +  geom_text(aes(label = round(value, 2))) +
+    scale_fill_scico(palette = "bam") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+    labs(y = "",
+         x = "",
+         fill = "Correlation") +
+    theme_classic() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("../figures/weekly_topic_correlations.pdf")
+```
