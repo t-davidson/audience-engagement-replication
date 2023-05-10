@@ -1294,7 +1294,7 @@ activity_likes <- ggplot(data = resids.posts.sim.likes$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "Activity", title = "Likes") + th
 
 activity_comments <- ggplot(data = resids.posts.sim.comments$simulation,
@@ -1311,7 +1311,7 @@ activity_comments <- ggplot(data = resids.posts.sim.comments$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "", title = "Comments") + th
 
 activity_shares <- ggplot(data = resids.posts.sim.shares$simulation,
@@ -1328,7 +1328,7 @@ activity_shares <- ggplot(data = resids.posts.sim.shares$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.p-10, ymax.p)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "", title = "Shares") + th
 
 # Recruitment
@@ -1346,7 +1346,7 @@ recruit_posts <- ggplot(data = recruits.sim.posts$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "Recruitment", title = "Posts") + th
 
 recruit_comments <- ggplot(data = recruits.sim.comments$simulation,
@@ -1363,7 +1363,7 @@ recruit_comments <- ggplot(data = recruits.sim.comments$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "", title = "Comments") + th
 
 recruit_shares <- ggplot(data = recruits.sim.shares$simulation,
@@ -1380,7 +1380,7 @@ recruit_shares <- ggplot(data = recruits.sim.shares$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.r-10, ymax.r)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "", title = "Shares") + th
 
 # Support
@@ -1398,7 +1398,7 @@ support_posts <- ggplot(data = supporters.sim.posts$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "Support", title = "Posts") + th
 
 support_comments <- ggplot(data = supporters.sim.comments$simulation,
@@ -1415,7 +1415,7 @@ support_comments <- ggplot(data = supporters.sim.comments$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "Time", y = "", title = "Comments") + th
 
 support_shares <- ggplot(data = supporters.sim.shares$simulation,
@@ -1432,7 +1432,7 @@ support_shares <- ggplot(data = supporters.sim.shares$simulation,
     geom_line() + theme_classic() +
     scale_x_continuous(breaks = scales::pretty_breaks(n = 6)) +
     scale_y_continuous(limits = c(ymin.s-1000, ymax.s+1000)) +
-    geom_vline(xintercept = 4, linetype = "dotted") +
+    geom_vline(xintercept = 5, linetype = "dotted") +
     labs(x = "", y = "", title = "Shares") + th
 
 
