@@ -1,4 +1,4 @@
-Replication materials for "Audience Engagement and the Dynamics of Online Activism: The Far-Right and Facebook", forthcoming in *Mobilization*.
+Replication materials for "Audience Engagement and the Dynamics of Online Activism: Far-Right Mobilization on Facebook", forthcoming in *Mobilization*.
 
 A pre-print is available here: https://osf.io/preprints/socarxiv/rwfjc
 
