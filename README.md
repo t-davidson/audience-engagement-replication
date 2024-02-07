@@ -1,4 +1,4 @@
-Replication materials for "Audience Engagement and the Dynamics of Online Activism: Far-Right Mobilization on Facebook", forthcoming in *Mobilization*.
+Replication materials for Thomas Davidson, 2024, "Audience Engagement and the Dynamics of Online Activism: Far-Right Mobilization on Facebook", *Mobilization* 28(4): 445-470.
 
 A pre-print is available here: https://osf.io/preprints/socarxiv/rwfjc
 
